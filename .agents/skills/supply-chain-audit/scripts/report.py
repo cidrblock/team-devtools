@@ -719,16 +719,25 @@ def generate_findings_details(findings: list[dict]) -> str:
         for f in cat_findings[:MAX_FINDINGS_PER_CATEGORY]:
             pr_num = f.get("pr_number")
             repo = f.get("repo", "")
+            finding_id = f.get("id", "")
             pr_link = ""
             if pr_num:
                 pr_link = (
                     f' <a href="https://github.com/ansible/{repo}/pull/{pr_num}" '
                     f'target="_blank" rel="noopener noreferrer">PR #{pr_num}</a>'
                 )
+            id_badge = (
+                f'<code style="font-size: 0.75rem; background: var(--bg-alt); '
+                f'padding: 0.1rem 0.4rem; border-radius: 3px; margin-right: 0.3rem;"'
+                f">{esc(finding_id)}</code>"
+                if finding_id
+                else ""
+            )
             summary_html = _linkify_advisory_ids(esc(f.get("summary", "")))
             details_html = _linkify_advisory_ids(esc(f.get("details", "")[:300]))
             items_html.append(
                 f'<div style="padding: 0.5rem 0; border-bottom: 1px solid var(--border);">'
+                f"{id_badge}"
                 f'<span class="badge badge-{f.get("risk_level", "info")}">{f.get("risk_level", "")}</span> '
                 f"<strong>{esc(repo)}</strong>{pr_link} \u2014 {summary_html}"
                 f'<div style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.3rem;">'
@@ -943,6 +952,7 @@ def _build_replacements(
     repos = manifest.get("repos", [])
     gh_version = manifest.get("gh_version", "unknown")
 
+    wrapped_sections = {f"{{{{{k}}}}}": v for k, v in sections.items()}
     return {
         "{{start_date}}": manifest["start_date"],
         "{{end_date}}": manifest["end_date"],
@@ -956,7 +966,7 @@ def _build_replacements(
         "{{total_dep_changes}}": str(len(deps)),
         "{{total_findings}}": str(len(findings)),
         "{{recommendations_section}}": recommendations_section,
-        **sections,
+        **wrapped_sections,
     }
 
 

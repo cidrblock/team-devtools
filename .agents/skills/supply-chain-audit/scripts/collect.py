@@ -240,6 +240,7 @@ def collect_pr_commits_and_reviews(repo: str, prs: list[dict]) -> list[dict]:
                     "committer_login": committer.get("login", "unknown"),
                     "date": commit_data.get("author", {}).get("date", ""),
                     "message": commit_data.get("message", "")[:MAX_COMMIT_MSG_LEN],
+                    "parent_count": len(c.get("parents", [])),
                 }
             )
 

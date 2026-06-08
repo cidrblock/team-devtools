@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -583,6 +584,25 @@ def detect_yanked_versions(deps: list[dict]) -> list[Finding]:
     ]
 
 
+_MERGE_FROM_MAIN_RE = re.compile(r"Merge branch '(main|master)' (into|of) ")
+_MERGE_PARENT_COUNT = 2
+
+
+def _is_verified_merge_from_main(commit: dict) -> bool:
+    """Return True if commit is a verified GitHub UI merge-from-main.
+
+    Requires all three conditions (non-spoofable combination):
+    - committer is 'web-flow' (set by GitHub, cannot be forged)
+    - commit has 2 parents (proves it is a real merge commit)
+    - message matches GitHub's canonical merge-from-main pattern
+    """
+    return (
+        commit.get("committer_login") == "web-flow"
+        and commit.get("parent_count", 0) == _MERGE_PARENT_COUNT
+        and bool(_MERGE_FROM_MAIN_RE.match(commit.get("message", "")))
+    )
+
+
 def detect_post_approval_commits(pr_audits: list[dict]) -> list[Finding]:
     """Detect commits pushed to a PR branch after the last approval.
 
@@ -606,11 +626,12 @@ def detect_post_approval_commits(pr_audits: list[dict]) -> list[Finding]:
             "unknown",
         )
 
-        post_approval = []
-        for c in commits:
-            commit_date = c.get("date", "")
-            if commit_date > last_approval_time:
-                post_approval.append(c)
+        post_approval = [
+            c
+            for c in commits
+            if c.get("date", "") > last_approval_time
+            and not _is_verified_merge_from_main(c)
+        ]
 
         if not post_approval:
             continue
@@ -1113,6 +1134,17 @@ def run_analysis(cache_dir: Path) -> list[Finding]:
     return all_findings
 
 
+_RISK_SORT_ORDER = ["critical", "high", "medium", "low", "info"]
+
+
+def _assign_finding_ids(findings: list[dict]) -> list[dict]:
+    """Sort findings by risk severity and assign stable SCA-NNN IDs."""
+    findings.sort(key=lambda f: _RISK_SORT_ORDER.index(f.get("risk_level", "info")))
+    for i, finding in enumerate(findings, start=1):
+        finding["id"] = f"SCA-{i:03d}"
+    return findings
+
+
 def _build_findings_summary(findings: list[dict], manifest: dict) -> dict:
     """Build a compact summary of findings for the agent to reason about."""
 
@@ -1139,19 +1171,16 @@ def _build_findings_summary(findings: list[dict], manifest: dict) -> dict:
                 "repos_affected": repos_affected,
                 "top_findings": [
                     {
+                        "id": f.get("id", ""),
                         "repo": f["repo"],
                         "risk_level": f["risk_level"],
                         "summary": f["summary"],
                     }
                     for f in sorted(
                         cat_findings,
-                        key=lambda x: [
-                            "critical",
-                            "high",
-                            "medium",
-                            "low",
-                            "info",
-                        ].index(x.get("risk_level", "info")),
+                        key=lambda x: _RISK_SORT_ORDER.index(
+                            x.get("risk_level", "info")
+                        ),
                     )[:5]
                 ],
             }
@@ -1216,7 +1245,7 @@ def main() -> None:
     print(f"Repos: {', '.join(manifest.get('repos', []))}")
 
     findings = run_analysis(cache_dir)
-    serialized = [f.to_dict() for f in findings]
+    serialized = _assign_finding_ids([f.to_dict() for f in findings])
     write_findings(cache_dir, serialized)
 
     # Write a compact summary for agent consumption

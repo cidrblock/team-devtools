@@ -378,6 +378,20 @@ This is the "sneak code in mid-PR" attack vector:
 | Commits from PR author pushed after someone else approved | HIGH |
 | Commits from the approver themselves (self-authored fixup) | MEDIUM |
 
+### Automatic suppression: merge-from-main commits
+
+Repositories that require branches to be current with `main` before merge
+will produce "Merge branch 'main' into ..." commits after approval. These
+are routine and expected. The detector **automatically suppresses** these
+when ALL three conditions are met:
+
+1. `committer_login == "web-flow"` (GitHub sets this; cannot be forged)
+2. Commit has exactly 2 parents (proves it is a real merge commit)
+3. Message matches `Merge branch '(main|master)' (into|of) ...`
+
+If any condition is missing the commit is NOT suppressed — e.g. a regular
+commit with a spoofed merge message would fail the parent-count check.
+
 ### False positives
 
 - **Reviewer pushes a suggestion commit**: GitHub's "commit suggestion"

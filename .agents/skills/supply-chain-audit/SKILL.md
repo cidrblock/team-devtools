@@ -1,9 +1,9 @@
 ---
 name: supply-chain-audit
 description: "Perform a supply chain vulnerability analysis across ADT ecosystem repos. Verifies commit signing, PR traceability, CI integrity, and dependency provenance within a time frame. Generates a standalone HTML dashboard report."
-version: "1.0"
+version: "1.1"
 allowed-tools: Read, Grep, Glob, Shell, WebSearch, WebFetch, Write, AskUserQuestion
-argument-hint: "[YYYY-MM-DD YYYY-MM-DD] or [YYYY-MM-DD YYYY-MM-DD package-name compromise-date]"
+argument-hint: "help | [last N days] | [YYYY-MM-DD YYYY-MM-DD] | [dive SCA-NNN]"
 mandatory: false
 type: workflow
 triggers:
@@ -11,6 +11,8 @@ triggers:
   - "supply chain"
   - "commit integrity"
   - "dependency provenance"
+  - "supply-chain-audit help"
+  - "supply-chain-audit dive"
 ---
 
 # Supply Chain Audit
@@ -38,13 +40,50 @@ All under `github.com/ansible/`:
 
 The user provides arguments as: `$ARGUMENTS`
 
+### Mode: Help
+
+```
+help
+```
+
+If `$ARGUMENTS` is `help`, print the **Help Content** section below and stop. Do not run any scripts.
+
+### Mode: Dive (Finding Investigation)
+
+```
+dive SCA-NNN
+```
+
+If `$ARGUMENTS` starts with `dive`, extract the finding ID (e.g., `SCA-023`). Then:
+
+1. Find the most recent cache directory under `.supply-chain-audit/cache/`
+2. Read `findings.json` and locate the finding with matching `"id"` field
+3. Present the full finding details to the user: repo, category, risk level, summary, evidence, commit SHA, PR number (with links)
+4. Read the relevant section from `.agents/skills/supply-chain-audit/references/detection-patterns.md` for that finding's category
+5. Provide the investigation steps from the detection pattern reference
+6. Offer to investigate further (e.g., fetch the commit diff, check the PR timeline, look up the advisory)
+
+Stop after presenting the deep-dive. Do not run analysis or generate reports.
+
 ### Phase 1 (Full Audit)
 
 ```
 <start-date> <end-date>
 ```
 
-Example: `2025-01-01 2025-03-01`
+Or a natural-language relative range:
+
+```
+last 7 days
+last 30 days
+last 2 weeks
+```
+
+If the user provides a relative range like "last 7 days" or "last 2 weeks", compute the actual ISO dates yourself:
+- `end_date` = today (YYYY-MM-DD)
+- `start_date` = today minus the specified duration
+
+Example: `2025-01-01 2025-03-01` or `last 7 days`
 
 ### Phase 2 (Package Focus)
 
@@ -69,6 +108,10 @@ The compromise-date is the date the package is suspected to have been compromise
 Parse `$ARGUMENTS` to extract:
 - `start_date` and `end_date` (required, ISO format YYYY-MM-DD)
 - Optionally: `package_name` and `compromise_date` (for Phase 2)
+
+If the user provides a relative range (e.g., "last 7 days", "last 2 weeks", "last 30 days"), resolve it to concrete dates:
+- `end_date` = today's date
+- `start_date` = today minus the specified duration
 
 If arguments are missing or malformed, ask the user to provide them in the correct format and stop.
 
@@ -214,3 +257,74 @@ If critical findings are detected (bypassed CI, post-merge pushes, suspicious de
 - Re-running with identical parameters produces identical output
 - To force a fresh collection, delete the cache directory or pass `--force` to collect.py
 - Git history is effectively immutable for merged PRs; cached data reflects the state at collection time
+
+---
+
+## Help Content
+
+Print this section verbatim when the user invokes `/supply-chain-audit help`.
+
+### What This Skill Does
+
+Performs a comprehensive supply chain integrity analysis across 12 Ansible DevTools repositories. It collects commit, PR, CI, dependency, and branch protection data via the GitHub API, then runs 13 anomaly detection passes to identify integrity risks. Results are presented as a standalone HTML dashboard with numbered findings (SCA-001, SCA-002, ...) that can be individually investigated.
+
+### Detection Categories
+
+| # | Category | Risk | What It Detects |
+|---|----------|------|-----------------|
+| 1 | Unsigned Commits | Medium | Commits without GPG/SSH signatures — cannot be cryptographically attributed |
+| 2 | GitHub-Web-Signed | Low | Commits signed by GitHub's key (not personal) — web UI edits, merge button |
+| 3 | Orphan Commits | High | Commits on default branch with no associated PR — bypassed code review |
+| 4 | Bypassed CI | High | PRs merged with failing *required* status checks |
+| 5 | Post-Merge Pushes | Critical | Commits pushed to a branch *after* its PR was merged — known attack vector |
+| 6 | Replicated Messages | High | Near-duplicate commit messages from different authors — impersonation indicator |
+| 7 | Suspicious Dep Timing | High | Dependencies adopted within days of release — possible poisoned package |
+| 8 | Yanked Versions | Critical | Dependencies referencing versions removed from registries |
+| 9 | Branch Protection Changes | Medium | Modifications to branch protection rules within the audit window |
+| 10 | Post-Approval Commits | High | Code pushed to a PR *after* reviewer approval — sneaking in changes |
+| 11 | Bot-Only Approval | Medium | PRs merged with only bot approvals, no human review |
+| 12 | Renovate Cooldown Violated | Critical | Deps adopted before the configured `minimumReleaseAge` elapsed |
+| 13 | Known Vulnerabilities | Critical/High | Packages with disclosed CVEs/GHSAs per OSV.dev |
+
+### How to Invoke
+
+| Mode | Syntax | Purpose |
+|------|--------|---------|
+| Full audit (dates) | `/supply-chain-audit 2025-05-29 2025-06-05` | Run all 13 checks for the date range |
+| Full audit (relative) | `/supply-chain-audit last 7 days` | Same as above, using today minus 7 days |
+| Package focus | `/supply-chain-audit 2025-05-29 2025-06-05 jinja2 2025-06-01` | Full audit + deep-dive on a specific package compromise |
+| Investigate finding | `/supply-chain-audit dive SCA-023` | Deep-dive into a numbered finding from a previous report |
+| Help | `/supply-chain-audit help` | Show this help content |
+
+Relative ranges accepted: `last N days`, `last N weeks`, `last N months`.
+
+### Investigating Findings (Dive Mode)
+
+Every finding in the report has a unique ID like `SCA-001`, `SCA-023`, etc. To investigate any finding:
+
+```
+/supply-chain-audit dive SCA-023
+```
+
+The agent will:
+1. Look up the finding by ID in the cached `findings.json`
+2. Show the full details: repo, category, risk level, commit SHA, PR link, evidence
+3. Pull the relevant investigation steps from the detection-patterns reference
+4. Offer to dig deeper — fetch the commit diff, check the PR timeline, look up advisories
+
+This lets you triage the report interactively: scan the HTML dashboard, spot something concerning, then ask the agent to investigate it by number.
+
+### Output Locations
+
+| File | Purpose |
+|------|---------|
+| `.supply-chain-audit/cache/<hash>/findings.json` | All findings with IDs (SCA-NNN), structured for agent analysis |
+| `.supply-chain-audit/cache/<hash>/findings_summary.json` | Aggregated summary for quick triage |
+| `.supply-chain-audit/cache/<hash>/recommendations.json` | Agent-written top-10 security recommendations |
+| `.supply-chain-audit/report.html` | Standalone HTML dashboard (no CDN deps) |
+
+### Prerequisites
+
+- `gh` CLI installed and authenticated
+- `python3` 3.10+
+- Network access to GitHub API and PyPI/npm/OSV.dev registries
