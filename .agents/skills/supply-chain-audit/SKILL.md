@@ -153,7 +153,7 @@ python3 .agents/skills/supply-chain-audit/scripts/analyze.py \
   --cache-dir ".supply-chain-audit/cache"
 ```
 
-This detects (13 passes):
+This detects (14 passes):
 - Unsigned commits
 - GitHub-web-signed commits (signer is GitHub, not a personal key)
 - Orphan commits (no associated PR)
@@ -167,6 +167,7 @@ This detects (13 passes):
 - Bot-only approvals (PRs merged without any human review)
 - Self-approved PRs (author approved their own code with no independent review)
 - Known vulnerabilities (all current packages scanned against OSV.dev)
+- Suspicious file patterns (`.claude/`, `.vscode/tasks.json`, CI/CD config changes)
 
 Output: `findings.json` in the cache directory.
 
@@ -285,6 +286,7 @@ Performs a comprehensive supply chain integrity analysis across 12 Ansible DevTo
 | 11 | Bot-Only Approval | Medium | PRs merged with only bot approvals, no human review |
 | 12 | Renovate Cooldown Violated | Critical | Deps adopted before the configured `minimumReleaseAge` elapsed |
 | 13 | Known Vulnerabilities | Critical/High | Packages with disclosed CVEs/GHSAs per OSV.dev |
+| 14 | Suspicious File Patterns | Critical/High | `.claude/` dirs (malware), CI/CD config changes, `.vscode/tasks.json` |
 
 ### How to Invoke
 

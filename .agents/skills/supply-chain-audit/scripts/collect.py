@@ -244,6 +244,16 @@ def collect_pr_commits_and_reviews(repo: str, prs: list[dict]) -> list[dict]:
                 }
             )
 
+        # Get changed file paths
+        files_endpoint = f"repos/{GITHUB_ORG}/{repo}/pulls/{pr_num}/files?per_page=100"
+        pr_files = gh_api(files_endpoint)
+        time.sleep(RATE_LIMIT_SLEEP)
+
+        if not pr_files or not isinstance(pr_files, list):
+            pr_files = []
+
+        changed_files = [f.get("filename", "") for f in pr_files]
+
         pr_audit_data.append(
             {
                 "repo": repo,
@@ -254,6 +264,7 @@ def collect_pr_commits_and_reviews(repo: str, prs: list[dict]) -> list[dict]:
                 "commits": commit_entries,
                 "approvals": approvals,
                 "commit_count": len(commit_entries),
+                "changed_files": changed_files,
             }
         )
 

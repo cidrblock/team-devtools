@@ -34,6 +34,7 @@ class FindingCategory(enum.Enum):
     COOLDOWN_VIOLATED = "cooldown_violated"
     KNOWN_VULNERABILITY = "known_vulnerability"
     SELF_APPROVED = "self_approved"
+    SUSPICIOUS_FILE_PATTERN = "suspicious_file_pattern"
 
 
 @dataclass

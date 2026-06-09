@@ -599,3 +599,74 @@ package inventory:
 4. Assess whether the vulnerable code path is actually exercised
 5. For critical/high: open an issue or PR to update immediately
 6. For medium/low: schedule update via normal renovate cycle
+
+---
+
+## 14. Suspicious File Patterns (Malware Vectors / CI Config Changes)
+
+### What it detects
+
+PRs that add or modify files in directories known to be used in supply chain
+attacks targeting developer tools:
+
+- **`.claude/` directory**: Confirmed malware vector (Miasma). A
+  `.claude/settings.json` containing `"command": "node .claude/setup.mjs"`
+  will execute arbitrary code when a developer opens the project with Claude.
+- **`.cursor/` directory**: AI agent config that can inject malicious prompts
+  or execute commands via rules/hooks.
+- **`.vscode/tasks.json`**: VS Code tasks can execute arbitrary commands when
+  a developer opens the project or triggers a task.
+- **`.vscode/launch.json`**: Debug configurations can execute on debug start.
+- **`.devcontainer/`**: Dev container configs execute during container creation.
+- **CI/CD configuration changes**: Modifications to `.github/workflows/`,
+  `.github/actions/`, `Dockerfile`, `Jenkinsfile`, etc. by human contributors
+  (bot-authored CI changes from renovate are excluded).
+
+### Why it matters
+
+These attacks exploit the trust developers place in their tooling:
+
+1. Attacker submits a PR with a benign-looking change + a hidden `.claude/`
+   or `.vscode/` directory
+2. Reviewer may not expand collapsed diffs or notice the extra directory
+3. On merge (or even clone for review), the malicious config executes
+4. The attacker gains code execution in the developer's environment or CI
+
+This is not theoretical — the Miasma malware campaign actively uses this
+vector against open source projects.
+
+### Risk levels
+
+| Scenario | Risk |
+|----------|------|
+| `.claude/` directory present (confirmed malware vector) | CRITICAL |
+| CI/CD config modified by human contributor | HIGH |
+| `.vscode/tasks.json`, `.devcontainer/` modifications | MEDIUM |
+| `.cursor/` directory present | MEDIUM |
+
+### False positives
+
+- **Legitimate CI improvements**: Maintainers regularly update workflows.
+  These are flagged HIGH (not CRITICAL) to ensure review, not to block.
+- **VS Code workspace settings**: Non-executable settings in `.vscode/`
+  (like `settings.json` with editor preferences) are NOT flagged — only
+  `tasks.json` and `launch.json` which can execute code.
+- **Renovate/bot CI updates**: Bot-authored CI changes are excluded from
+  the HIGH-risk flag since they come from trusted automation.
+
+### Investigation steps
+
+1. **For `.claude/` or `.cursor/`**: Do NOT clone or open the branch locally.
+   Review the file contents via the GitHub web UI only. Look for `"command"`
+   keys, `setup.mjs`, or any executable references. If found, report as
+   confirmed malware immediately.
+2. **For CI/CD changes**: Verify the author is a known maintainer. Review
+   every line of the workflow diff — look for `curl | bash`, encoded payloads,
+   exfiltration of secrets, or new external actions from untrusted sources.
+3. **For `.vscode/tasks.json`**: Check what commands are defined. Are they
+   project-appropriate (e.g., `npm build`) or suspicious (e.g., downloading
+   and executing remote scripts)?
+4. **For `.devcontainer/`**: Review the Dockerfile and any lifecycle scripts
+   (`postCreateCommand`, `onCreateCommand`) for unexpected network calls or
+   package installations.
+5. **When in doubt**: Delete/close the PR rather than risk compromise.

@@ -946,6 +946,120 @@ def detect_self_approval(pr_audits: list[dict]) -> list[Finding]:
     return findings
 
 
+# Patterns known to be used in supply chain attacks targeting developer tools
+_SUSPICIOUS_DIRS = frozenset(
+    {
+        ".claude/",
+        ".claude\\",
+        ".cursor/",
+        ".cursor\\",
+    }
+)
+
+_SUSPICIOUS_FILE_PATTERNS: list[tuple[str, str]] = [
+    (".claude/", "AI agent config directory — known malware vector (Miasma)"),
+    (".cursor/", "AI agent config directory — potential prompt injection vector"),
+    (".vscode/tasks.json", "VS Code tasks — can execute arbitrary commands on open"),
+    (".vscode/launch.json", "VS Code launch config — can execute on debug start"),
+    (".devcontainer/", "Dev container config — executes on container creation"),
+]
+
+_CI_CONFIG_PATTERNS: list[str] = [
+    ".github/workflows/",
+    ".github/actions/",
+    "Jenkinsfile",
+    "Dockerfile",
+    ".gitlab-ci.yml",
+    "azure-pipelines.yml",
+]
+
+
+def detect_suspicious_file_patterns(pr_audits: list[dict]) -> list[Finding]:
+    """Detect PRs containing file paths associated with supply chain attacks.
+
+    Flags:
+    - CRITICAL: .claude/ directory (confirmed malware vector)
+    - HIGH: CI/CD config changes by non-bot authors
+    - MEDIUM: .vscode/tasks.json, .devcontainer/ modifications
+    """
+    findings = []
+
+    for audit in pr_audits:
+        changed_files = audit.get("changed_files", [])
+        if not changed_files:
+            continue
+
+        repo = audit.get("repo", "")
+        pr_num = audit.get("pr_number", 0)
+        pr_author = audit.get("pr_author", "")
+        pr_title = audit.get("pr_title", "")
+
+        # Check for known malicious file patterns
+        for file_path in changed_files:
+            for pattern, reason in _SUSPICIOUS_FILE_PATTERNS:
+                if pattern in file_path or file_path.startswith(pattern):
+                    is_claude = ".claude/" in file_path
+                    risk = RiskLevel.CRITICAL if is_claude else RiskLevel.MEDIUM
+                    findings.append(
+                        Finding(
+                            category=FindingCategory.SUSPICIOUS_FILE_PATTERN,
+                            risk_level=risk,
+                            repo=repo,
+                            summary=(
+                                f"PR #{pr_num}: contains suspicious path '{file_path}'"
+                            ),
+                            details=(
+                                f"PR #{pr_num} ('{pr_title}') in {repo} by "
+                                f"{pr_author} modifies '{file_path}'. "
+                                f"Reason: {reason}"
+                            ),
+                            pr_number=pr_num,
+                            date=audit.get("merged_at"),
+                            evidence={
+                                "file_path": file_path,
+                                "pr_author": pr_author,
+                                "pattern_matched": pattern,
+                                "reason": reason,
+                                "all_changed_files": changed_files,
+                            },
+                        )
+                    )
+                    break
+
+        # Check for CI/CD config changes by non-bot contributors
+        ci_files = [
+            f for f in changed_files if any(p in f for p in _CI_CONFIG_PATTERNS)
+        ]
+        if ci_files and not _is_bot_account(pr_author):
+            findings.append(
+                Finding(
+                    category=FindingCategory.SUSPICIOUS_FILE_PATTERN,
+                    risk_level=RiskLevel.HIGH,
+                    repo=repo,
+                    summary=(
+                        f"PR #{pr_num}: CI/CD config modified by {pr_author} "
+                        f"({len(ci_files)} file(s))"
+                    ),
+                    details=(
+                        f"PR #{pr_num} ('{pr_title}') in {repo} by "
+                        f"{pr_author} modifies CI/CD configuration: "
+                        f"{', '.join(ci_files[:5])}. CI/CD changes require "
+                        f"extra scrutiny as they can execute arbitrary code "
+                        f"in the build pipeline."
+                    ),
+                    pr_number=pr_num,
+                    date=audit.get("merged_at"),
+                    evidence={
+                        "ci_files_modified": ci_files,
+                        "pr_author": pr_author,
+                        "total_files_changed": len(changed_files),
+                    },
+                )
+            )
+
+    return findings
+
+
 def _print_cache_stats(
     commits: list[dict],
     prs: list[dict],
@@ -1003,13 +1117,13 @@ def _run_detection_passes(
         tuple[str, str, Callable[[], list[Finding]], Callable[[list[Finding]], str]]
     ] = [
         (
-            "[1/12]",
+            "[1/14]",
             "Unsigned commits",
             lambda: detect_unsigned_commits(commits),
             lambda findings: f"Found {len(findings)} unsigned commits",
         ),
         (
-            "[2/12]",
+            "[2/14]",
             "GitHub-web-signed commits (excluding PR merges)",
             lambda: detect_github_web_signed(commits, prs),
             lambda findings: (
@@ -1017,31 +1131,31 @@ def _run_detection_passes(
             ),
         ),
         (
-            "[3/12]",
+            "[3/14]",
             "Orphan commits (no PR)",
             lambda: detect_orphan_commits(commits, prs),
             lambda findings: f"Found {len(findings)} orphan commits",
         ),
         (
-            "[4/12]",
+            "[4/14]",
             "Bypassed CI (required checks only)",
             lambda: detect_bypassed_ci(commits, prs, checks, protection),
             lambda findings: f"Found {len(findings)} bypassed CI instances",
         ),
         (
-            "[5/12]",
+            "[5/14]",
             "Post-merge pushes",
             lambda: detect_post_merge_pushes(commits, prs),
             lambda findings: f"Found {len(findings)} post-merge pushes",
         ),
         (
-            "[6/12]",
+            "[6/14]",
             "Replicated commit messages",
             lambda: detect_replicated_messages(commits),
             lambda findings: f"Found {len(findings)} replicated messages",
         ),
         (
-            "[7/12]",
+            "[7/14]",
             "Dependency cooldown policy check",
             lambda: detect_suspicious_dep_timing(deps, renovate_configs),
             lambda findings: (
@@ -1052,40 +1166,46 @@ def _run_detection_passes(
             ),
         ),
         (
-            "[8/12]",
+            "[8/14]",
             "Yanked/deleted versions",
             lambda: detect_yanked_versions(deps),
             lambda findings: f"Found {len(findings)} yanked versions",
         ),
         (
-            "[9/12]",
+            "[9/14]",
             "Branch protection changes",
             lambda: detect_protection_changes(protection),
             lambda findings: f"Found {len(findings)} protection findings",
         ),
         (
-            "[10/12]",
+            "[10/14]",
             "Post-approval commits in PRs",
             lambda: detect_post_approval_commits(pr_audits),
             lambda findings: f"Found {len(findings)} PRs with post-approval commits",
         ),
         (
-            "[11/13]",
+            "[11/14]",
             "Bot-only approvals (no human review)",
             lambda: detect_bot_only_approval(pr_audits, prs),
             lambda findings: f"Found {len(findings)} PRs with bot-only approval",
         ),
         (
-            "[12/13]",
+            "[12/14]",
             "Self-approved PRs",
             lambda: detect_self_approval(pr_audits),
             lambda findings: f"Found {len(findings)} self-approved PRs",
         ),
         (
-            "[13/13]",
+            "[13/14]",
             "Known vulnerabilities (OSV.dev)",
             lambda: detect_known_vulnerabilities(vulns),
             lambda findings: f"Found {len(findings)} known vulnerabilities",
+        ),
+        (
+            "[14/14]",
+            "Suspicious file patterns (malware vectors, CI/CD changes)",
+            lambda: detect_suspicious_file_patterns(pr_audits),
+            lambda findings: f"Found {len(findings)} suspicious file patterns",
         ),
     ]
 
