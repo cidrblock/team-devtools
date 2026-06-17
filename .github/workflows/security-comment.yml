@@ -1,0 +1,159 @@
+---
+# Trusted workflow — runs after security-scan.yml completes.
+# Has write permissions to post/update PR comments but NEVER executes
+# untrusted code. Only reads structured JSON from the scan artifact.
+#
+# Architecture rationale: this is the privileged half of the two-workflow
+# pattern that avoids pull_request_target + script execution vulnerabilities.
+# See: https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+name: security-comment
+
+"on":
+  workflow_run:
+    workflows: ["security-scan"]
+    types:
+      - completed
+
+permissions:
+  pull-requests: write
+  actions: read
+
+jobs:
+  comment:
+    runs-on: ubuntu-24.04
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion != 'cancelled'
+    steps:
+      - name: Download scan results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: security-scan-results
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Render and post comment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('scan-results.json', 'utf8'));
+            const prNumber = data.pr_number;
+            const repo = context.repo;
+
+            // ── Build markdown from structured JSON ──
+            const marker = '<!-- security-check-result -->';
+            const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+            const lines = [marker, '## PR Security Check', ''];
+
+            // Pattern scan findings
+            const pat = data.pattern_scan || {};
+            const findings = pat.findings || [];
+            for (const f of findings) {
+              if (f.severity === 'PASS') {
+                lines.push(`### ${f.title}`);
+                lines.push('');
+                lines.push(f.description);
+                lines.push('');
+              } else {
+                lines.push(`### ${f.severity}: ${f.title}`);
+                lines.push('');
+                lines.push(f.description);
+                lines.push('');
+                if (f.files && f.files.length > 0) {
+                  lines.push('**Files:**');
+                  for (const file of f.files) {
+                    // Sanitize: only allow safe path characters
+                    const safe = file.replace(/[^a-zA-Z0-9_./@-]/g, '_');
+                    lines.push(`- \`${safe}\``);
+                  }
+                  lines.push('');
+                }
+              }
+            }
+
+            // Dependency scan results
+            const dep = data.dep_scan || {};
+            if (dep.total_packages > 0) {
+              const depStatus = dep.status || 'PASS';
+              const depFiles = (dep.dep_files || []).map(f => `\`${f}\``).join(', ');
+              lines.push('### Dependency Vulnerability Scan');
+              lines.push('');
+              lines.push(`**Status**: ${depStatus}`);
+              lines.push(`**Files**: ${depFiles}`);
+              lines.push('');
+
+              const allPkgs = [...(dep.vulnerable || []), ...(dep.clean || [])];
+              if (allPkgs.length > 0) {
+                lines.push('| Package | Version | Ecosystem | Status | Advisory |');
+                lines.push('|---------|---------|-----------|--------|----------|');
+                for (const pkg of dep.vulnerable || []) {
+                  const advisories = (pkg.advisories || []).map(a => {
+                    const url = a.id.startsWith('GHSA-')
+                      ? `https://github.com/advisories/${a.id}`
+                      : `https://osv.dev/vulnerability/${a.id}`;
+                    return `[${a.id}](${url})`;
+                  }).join(', ');
+                  lines.push(`| ${pkg.name} | ${pkg.newVersion} | ${pkg.ecosystem} | **VULNERABLE** | ${advisories} |`);
+                }
+                for (const pkg of dep.clean || []) {
+                  lines.push(`| ${pkg.name} | ${pkg.newVersion} | ${pkg.ecosystem} | Clean | — |`);
+                }
+                lines.push('');
+              }
+
+              const vulnCount = (dep.vulnerable || []).length;
+              const cleanCount = (dep.clean || []).length;
+              lines.push(`**Summary**: ${dep.total_packages} packages scanned. ${cleanCount} clean. ${vulnCount} vulnerable.`);
+              lines.push('');
+            } else if (dep.status) {
+              lines.push('### Dependency Vulnerability Scan');
+              lines.push('');
+              lines.push('No dependency file changes detected in this PR.');
+              lines.push('');
+            }
+
+            // Determine overall status
+            const patStatus = pat.status || 'PASS';
+            const depStatus = dep.status || 'PASS';
+            let overall = 'PASS';
+            if (patStatus === 'CRITICAL' || depStatus === 'FAIL') overall = 'FAIL';
+            else if (patStatus === 'HIGH') overall = 'WARNING';
+            else if (patStatus === 'MEDIUM') overall = 'INFO';
+
+            // Prepend overall status
+            lines.splice(3, 0, `**Overall**: ${overall}`, `**Scanned**: ${now}`, '');
+
+            lines.push('---');
+            lines.push('_Runs on every PR update. Powered by [security-scan](../actions/workflows/security-scan.yml)._');
+
+            const body = lines.join('\n');
+
+            // ── Post or update comment ──
+            const comments = await github.rest.issues.listComments({
+              ...repo,
+              issue_number: prNumber,
+              per_page: 100,
+            });
+            const existing = comments.data.find(c => c.body && c.body.startsWith(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                ...repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Updated comment ${existing.id} on PR #${prNumber}`);
+            } else {
+              await github.rest.issues.createComment({
+                ...repo,
+                issue_number: prNumber,
+                body,
+              });
+              core.info(`Created comment on PR #${prNumber}`);
+            }
+
+            // ── Set commit status based on findings ──
+            if (overall === 'FAIL') {
+              core.setFailed('Security check failed — see PR comment for details');
+            }

@@ -1,0 +1,92 @@
+---
+# Security scan workflow — runs in the UNPRIVILEGED pull_request context.
+# No secrets, no write permissions. Produces a JSON artifact consumed by
+# security-comment.yml (workflow_run trigger).
+#
+# Architecture rationale: splitting scan from comment avoids the
+# pull_request_target + script execution anti-pattern ("pwn requests").
+# See: https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+name: security-scan
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_call:
+permissions:
+  contents: read
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Get PR diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr diff "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" > /tmp/pr.diff || true
+
+      - name: Run dependency vulnerability scan
+        id: dep_scan
+        run: |
+          python .github/scripts/dep-check.py \
+            --diff /tmp/pr.diff \
+            --output /tmp/dep-results.json \
+            --format json
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Detect suspicious file patterns
+        id: patterns
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          python .github/scripts/pattern-check.py \
+            --pr-number "$PR_NUMBER" \
+            --author "$PR_AUTHOR" \
+            --branch "$PR_BRANCH" \
+            --output /tmp/pattern-results.json
+
+      - name: Compose scan results
+        run: |
+          python -c "
+          import json, os
+          pr_number = int(os.environ['PR_NUMBER'])
+          dep = {}
+          pat = {}
+          if os.path.exists('/tmp/dep-results.json'):
+              with open('/tmp/dep-results.json') as f:
+                  dep = json.load(f)
+          if os.path.exists('/tmp/pattern-results.json'):
+              with open('/tmp/pattern-results.json') as f:
+                  pat = json.load(f)
+          result = {
+              'pr_number': pr_number,
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'dep_scan': dep,
+              'pattern_scan': pat,
+          }
+          with open('/tmp/scan-results.json', 'w') as f:
+              json.dump(result, f, indent=2)
+          "
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: security-scan-results
+          path: /tmp/scan-results.json
+          retention-days: 1
